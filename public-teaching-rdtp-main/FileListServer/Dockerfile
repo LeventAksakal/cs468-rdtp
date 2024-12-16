@@ -1,8 +1,8 @@
-FROM alpine/git as clone
+FROM alpine/git AS clone
 WORKDIR /app
 RUN git clone https://github.com/streaming-university/rdtp.git
 
-FROM maven:3.5-jdk-8-alpine as build
+FROM maven:3.5-jdk-8-alpine AS build
 WORKDIR /app
 COPY --from=clone /app/rdtp/FileListServer /app
 RUN ["mvn", "compile"]
@@ -21,3 +21,5 @@ COPY --from=build /app/files /app/files
 # ADD files /app/files
 RUN apk update && apk add bash iproute2 && apk add nano
 
+EXPOSE 5000/udp
+EXPOSE 5001/udp
