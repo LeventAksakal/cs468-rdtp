@@ -4,7 +4,6 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -12,13 +11,17 @@ import java.io.IOException;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Scanner;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.PriorityBlockingQueue;
 
 import model.FileDataResponseType;
 import model.FileDescriptor;
@@ -38,7 +41,6 @@ public class dummyClient {
     private static long fileSize = -1;
 
     private static ServerEndpoint endpoint1;
-    @SuppressWarnings("unused")
     private static ServerEndpoint endpoint2;
 
     @SuppressWarnings("unused")
@@ -89,19 +91,11 @@ public class dummyClient {
         return response.getFileSize();
     }
 
-    /// TODO: getFileData() should send one request for one packet. It should send
-    /// burst of requests.
-    /// But it should recieve each packet asynchronously. It should re-order the
-    /// packets and return the byte[]
-    /// Set timeout for the socket dynamically with the RTT 1001, 100001, 2000,
-    /// 3000, 203001-20400 204001-204539
-    private byte[] getFileData(ServerEndpoint endpoint, int file_id, long start, long end)
-            throws IOException, InterruptedException {
+    private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end,
+            BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
         DatagramSocket dsocket = new DatagramSocket();
         dsocket.setSoTimeout(requestTimeout);
 
-        /// TODO: check if packetIDs are calculated correctly
-        /// 1-1000 => 1, 2001-3000 =>3, 203001-20400=> 204, 204001-204539 => 205
         int startPacket = (int) (start / ResponseType.MAX_DATA_SIZE);
         int endPacket = (int) (end / ResponseType.MAX_DATA_SIZE);
         int totalPackets = endPacket - startPacket + 1;
@@ -109,58 +103,74 @@ public class dummyClient {
         ExecutorService executor = Executors.newFixedThreadPool(totalPackets);
         ConcurrentHashMap<Integer, byte[]> packetMap = new ConcurrentHashMap<>();
         CountDownLatch latch = new CountDownLatch(totalPackets);
+        ConcurrentLinkedQueue<Integer> jobPool = new ConcurrentLinkedQueue<>();
 
-        /// TODO: Instead of this version; use jobPools to assign packets to threads.
-        /// Each thread will work until the jobPool is empty
         for (int i = startPacket; i <= endPacket; i++) {
-            final int packetIndex = i;
+            jobPool.add(i);
+        }
+
+        for (int i = 0; i < totalPackets; i++) {
             executor.submit(() -> {
-                try {
-                    /// TODO: sendData should be check for the endByte. If fileSize<(packetIndex +
-                    /// 1) * ResponseType.MAX_DATA_SIZE? fileSize:(packetIndex + 1)
-                    /// *ResponseType.MAX_DATA_SIZE
-                    byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
-                            packetIndex * ResponseType.MAX_DATA_SIZE, (packetIndex + 1) * ResponseType.MAX_DATA_SIZE,
-                            null).toByteArray();
-                    byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
-                    DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
+                while (!jobPool.isEmpty()) {
+                    Integer packetIndex = jobPool.poll();
+                    if (packetIndex == null) {
+                        break;
+                    }
 
-                    while (true) {
-                        long startTime = System.nanoTime();
-                        dsocket.send(new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(),
-                                endpoint.getPort()));
-                        try {
-                            dsocket.receive(receivePacket);
-                            long endTime = System.nanoTime();
-                            endpoint.metrics.updateRtt((endTime - startTime));
+                    try {
+                        long packetStartByte = packetIndex * ResponseType.MAX_DATA_SIZE + 1;
+                        long packetEndByte = (packetIndex == endPacket) ? end
+                                : (packetIndex + 1) * ResponseType.MAX_DATA_SIZE;
 
-                            FileDataResponseType response = new FileDataResponseType(receivePacket.getData());
-                            int receivedPacketIndex = (int) response.getEnd_byte() / ResponseType.MAX_DATA_SIZE;
+                        byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
+                                packetStartByte, packetEndByte, null).toByteArray();
+                        byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
+                        DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
 
-                            if (receivedPacketIndex == packetIndex) {
-                                // Correct packet received
-                                packetMap.put(packetIndex, response.getData());
-                                break;
-                            } else if (packetMap.containsKey(receivedPacketIndex)) {
-                                // Duplicate packet received
-                                continue;
-                            } else {
-                                // Inform the correct thread
-                                synchronized (packetMap) {
-                                    if (!packetMap.containsKey(receivedPacketIndex)) {
-                                        packetMap.put(receivedPacketIndex, response.getData());
-                                        packetMap.notifyAll();
+                        boolean packetReceived = false;
+                        while (!packetReceived) {
+                            long startTime = System.nanoTime();
+                            dsocket.send(new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(),
+                                    endpoint.getPort()));
+                            try {
+                                dsocket.receive(receivePacket);
+                                long endTime = System.nanoTime();
+                                endpoint.metrics.updateRtt((endTime - startTime));
+
+                                FileDataResponseType response = new FileDataResponseType(receivePacket.getData());
+                                int receivedPacketIndex = (int) response.getEnd_byte() / ResponseType.MAX_DATA_SIZE;
+
+                                if (receivedPacketIndex == packetIndex) {
+                                    // Correct packet received
+                                    packetMap.put(packetIndex, response.getData());
+                                    packetQueue.put(response); // Add to packetQueue
+                                    packetReceived = true;
+                                } else if (packetMap.containsKey(receivedPacketIndex)) {
+                                    // Duplicate packet received
+                                    continue;
+                                } else {
+                                    // Inform the correct thread
+                                    synchronized (packetMap) {
+                                        if (!packetMap.containsKey(receivedPacketIndex)) {
+                                            packetMap.put(receivedPacketIndex, response.getData());
+                                            packetQueue.put(response); // Add to packetQueue
+                                            packetMap.notifyAll();
+                                        }
                                     }
                                 }
+                            } catch (Exception e) {
+                                System.err.println("Receive operation timed out. No packet received.");
+                                if (packetMap.containsKey(packetIndex)) {
+                                    // Packet was received by another thread
+                                    packetReceived = true;
+                                }
                             }
-                        } catch (SocketTimeoutException e) {
-                            System.err.println("Receive operation timed out. No packet received.");
                         }
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    } finally {
+                        latch.countDown();
                     }
-                } catch (IOException e) {
-                    e.printStackTrace();
-                } finally {
-                    latch.countDown();
                 }
             });
         }
@@ -168,29 +178,7 @@ public class dummyClient {
         latch.await();
         executor.shutdown();
         dsocket.close();
-
-        // Reorder packets and combine into a single byte array
-        ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-        for (int i = startPacket; i <= endPacket; i++) {
-            outputStream.write(packetMap.get(i));
-        }
-
-        return outputStream.toByteArray();
     }
-    /// TODO: Get file is the main controller that will select which endpoint to use
-    /// and will controll the flow based on endpoint.metrics. It should work like
-    /// this:
-    /// Have a pool of packets to be downloaded
-    /// While(packets not downloaded) assign packets to endpoints based on their
-    /// metrics
-    /// getFileData() will handle to downloading part and return the downloaded list
-    /// of byte[]
-    /// getFileData() will return the packets in order so getFile() should write the
-    /// recieved packets to
-    /// FileOutputStream to avoid buffering the whole downloaded file which is
-    /// impossible for large files
-    /// Also getFile() should print the throughput and the average RTT of each
-    /// endpoint and download progression
 
     private void getFile(int file_id) throws IOException {
         File directory = new File(FOLDER_PATH);
@@ -201,40 +189,47 @@ public class dummyClient {
 
         long packetCount = (fileSize + ResponseType.MAX_DATA_SIZE - 1) / ResponseType.MAX_DATA_SIZE;
 
-        // Create a job pool to store the remaining packets that need to be requested
         ConcurrentLinkedQueue<Long> jobPool = new ConcurrentLinkedQueue<>();
         for (int i = 0; i < packetCount; i++) {
             jobPool.add((long) i);
         }
 
-        long startTime = System.currentTimeMillis();
+        BlockingQueue<FileDataResponseType> packetQueue = new PriorityBlockingQueue<>();
 
-        /// TODO: endpoint1 and endpoint2 should be properly synchronized before writing
-        /// to the file output stream
+        long startTime = System.currentTimeMillis();
         try (FileOutputStream fos = new FileOutputStream(filePath)) {
-            Thread endpoint1Thread = new Thread(() -> {
+            Thread writerThread = new Thread(() -> {
                 try {
-                    processPackets(endpoint1, file_id, jobPool, fos);
+                    writePackets(fos, packetQueue, packetCount);
                 } catch (IOException | InterruptedException e) {
                     e.printStackTrace();
                 }
+            });
 
+            Thread endpoint1Thread = new Thread(() -> {
+                try {
+                    processPackets(endpoint1, file_id, jobPool, packetQueue);
+                } catch (IOException | InterruptedException e) {
+                    e.printStackTrace();
+                }
             });
 
             Thread endpoint2Thread = new Thread(() -> {
                 try {
-                    processPackets(endpoint2, file_id, jobPool, fos);
+                    processPackets(endpoint2, file_id, jobPool, packetQueue);
                 } catch (IOException | InterruptedException e) {
                     e.printStackTrace();
                 }
-
             });
 
+            writerThread.start();
             endpoint1Thread.start();
             endpoint2Thread.start();
 
             endpoint1Thread.join();
             endpoint2Thread.join();
+            writerThread.join();
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -243,22 +238,74 @@ public class dummyClient {
         System.out.println("File downloaded successfully in " + (endTime - startTime) + " milliseconds.");
     }
 
-    /// TODO: Process packets should apply flow control using endpoint.metrics
     private void processPackets(ServerEndpoint endpoint, int file_id, ConcurrentLinkedQueue<Long> jobPool,
-            FileOutputStream fos)
-            throws IOException, InterruptedException {
+            BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
         while (!jobPool.isEmpty()) {
-            Long packetIndex = jobPool.poll();
-            if (packetIndex == null) {
+            int packetsToRequest = calculatePacketsToRequest(endpoint.getMetrics());
+
+            List<Long> packetIndices = new ArrayList<>();
+            for (int i = 0; i < packetsToRequest; i++) {
+                Long packetIndex = jobPool.poll();
+                if (packetIndex == null) {
+                    break;
+                }
+                packetIndices.add(packetIndex);
+            }
+
+            if (packetIndices.isEmpty()) {
                 break;
             }
 
-            long start = packetIndex * ResponseType.MAX_DATA_SIZE + 1;
-            long end = Math.min((packetIndex + 1) * ResponseType.MAX_DATA_SIZE, fileSize);
+            long start = packetIndices.get(0) * ResponseType.MAX_DATA_SIZE + 1;
+            long end = Math.min((packetIndices.get(packetIndices.size() - 1) + 1) * ResponseType.MAX_DATA_SIZE,
+                    fileSize);
 
-            byte[] packet = getFileData(endpoint, file_id, start, end);
-            synchronized (fos) {
-                fos.write(packet); // Write each chunk to the file
+            getFileData(endpoint, file_id, start, end, packetQueue);
+        }
+    }
+
+    private int calculatePacketsToRequest(NetworkMetrics metrics) {
+        double throughput = metrics.getAverageThroughput();
+        double packetLossRate = metrics.getPacketLossRate();
+        double jitter = metrics.getAverageJitter();
+        double rtt = metrics.getAverageRtt();
+
+        int basePackets = 10;
+        int adjustedPackets = basePackets;
+
+        if (throughput > 0) {
+            adjustedPackets = (int) (throughput / ResponseType.MAX_DATA_SIZE);
+        }
+
+        if (packetLossRate > 0.1) {
+            adjustedPackets = Math.max(1, adjustedPackets / 2);
+        }
+
+        if (jitter > 50) {
+            adjustedPackets = Math.max(1, adjustedPackets / 2);
+        }
+
+        if (rtt > 100) {
+            adjustedPackets = Math.max(1, adjustedPackets / 2);
+        }
+
+        return Math.max(1, adjustedPackets);
+    }
+
+    private void writePackets(FileOutputStream fos, BlockingQueue<FileDataResponseType> packetQueue, long packetCount)
+            throws IOException, InterruptedException {
+        long nextStartByte = 1;
+        while (nextStartByte < fileSize) {
+            FileDataResponseType packetData = packetQueue.take(); // Take the next packet from the queue
+
+            if (packetData.getStart_byte() == nextStartByte) {
+                fos.write(packetData.getData());
+                nextStartByte = packetData.getEnd_byte() + 1;
+            } else {
+                // If the packet is not in order, put it back into the queue
+                packetQueue.put(packetData);
+                // Wait briefly before checking again
+                Thread.sleep(10);
             }
         }
     }
@@ -282,6 +329,7 @@ public class dummyClient {
         return sb.toString();
     }
 
+    @SuppressWarnings("unused")
     private void showProgressBar(int current, int total, ServerEndpoint endpoint1, ServerEndpoint endpoint2) {
         int barLength = 50; // Length of the progress bar in characters
         int progress = (int) ((double) current / total * barLength);
