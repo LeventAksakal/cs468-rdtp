@@ -20,5 +20,10 @@ public class ServerEndpoint {
 
     public int getPort() {
         return port;
+
+    }
+
+    public NetworkMetrics getMetrics() {
+        return metrics;
     }
 }
