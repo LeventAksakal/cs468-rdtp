@@ -130,26 +130,29 @@ public class dummyClient {
             directory.mkdirs();
         }
         filePath = FOLDER_PATH + "/file_" + file_id;
-
+    
         long packetCount = (fileSize + ResponseType.MAX_DATA_SIZE - 1) / ResponseType.MAX_DATA_SIZE;
-
+    
         long startTime = System.currentTimeMillis();
         try (FileOutputStream fos = new FileOutputStream(filePath)) { // Open file output stream
             for (int i = 0; i < packetCount; i++) {
                 long start = i * ResponseType.MAX_DATA_SIZE + 1;
                 long end = Math.min((i + 1) * ResponseType.MAX_DATA_SIZE, fileSize);
-
+    
                 byte[] packet = getFileData(endpoint1, file_id, start, end);
                 fos.write(packet); // Write each chunk to the file
-
+    
+                // Update the progress bar
+                showProgressBar(i + 1, (int) packetCount, endpoint1, endpoint2);
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
         long endTime = System.currentTimeMillis();
-
-        System.out.println("File downloaded successfully in " + (endTime - startTime) + " milliseconds.");
-
+    
+        // Ensure the progress bar reaches 100% before completing
+        showProgressBar((int) packetCount, (int) packetCount, endpoint1, endpoint2);
+        System.out.println("\nFile downloaded successfully in " + (endTime - startTime) + " milliseconds.");
     }
 
     private String computeFileDigest(String filePath, String algorithm) throws IOException, NoSuchAlgorithmException {
@@ -198,6 +201,35 @@ public class dummyClient {
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
+    }
+
+    private void showProgressBar(int current, int total, ServerEndpoint endpoint1, ServerEndpoint endpoint2) {
+        int barLength = 50; // Length of the progress bar in characters
+        int progress = (int) ((double) current / total * barLength);
+        StringBuilder bar = new StringBuilder("[");
+        for (int i = 0; i < barLength; i++) {
+            if (i < progress) {
+                bar.append("=");
+            } else {
+                bar.append(" ");
+            }
+        }
+        bar.append("] ").append((current * 100) / total).append("%");
+    
+        String metrics = String.format(
+                "E1 RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%% | E2 RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%",
+                endpoint1.getMetrics().getAverageRtt(),
+                endpoint1.getMetrics().getAverageJitter(),
+                endpoint1.getMetrics().getPacketLossRate() * 100,
+                endpoint2.getMetrics().getAverageRtt(),
+                endpoint2.getMetrics().getAverageJitter(),
+                endpoint2.getMetrics().getPacketLossRate() * 100
+        );
+        
+        // Clear the previous line
+        System.out.print("\033[1A\033[2K");
+        // Print the progress bar and metrics on separate lines
+        System.out.print("\r" + bar.toString() + "\n" + metrics);
     }
 
     public static void main(String[] args) throws Exception {
