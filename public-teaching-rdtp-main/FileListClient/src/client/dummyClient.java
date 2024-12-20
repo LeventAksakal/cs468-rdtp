@@ -93,12 +93,15 @@ public class dummyClient {
     /// burst of requests.
     /// But it should recieve each packet asynchronously. It should re-order the
     /// packets and return the byte[]
-    /// Set timeout for the socket dynamically with the RTT
+    /// Set timeout for the socket dynamically with the RTT 1001, 100001, 2000,
+    /// 3000, 203001-20400 204001-204539
     private byte[] getFileData(ServerEndpoint endpoint, int file_id, long start, long end)
             throws IOException, InterruptedException {
         DatagramSocket dsocket = new DatagramSocket();
         dsocket.setSoTimeout(requestTimeout);
 
+        /// TODO: check if packetIDs are calculated correctly
+        /// 1-1000 => 1, 2001-3000 =>3, 203001-20400=> 204, 204001-204539 => 205
         int startPacket = (int) (start / ResponseType.MAX_DATA_SIZE);
         int endPacket = (int) (end / ResponseType.MAX_DATA_SIZE);
         int totalPackets = endPacket - startPacket + 1;
@@ -107,10 +110,15 @@ public class dummyClient {
         ConcurrentHashMap<Integer, byte[]> packetMap = new ConcurrentHashMap<>();
         CountDownLatch latch = new CountDownLatch(totalPackets);
 
+        /// TODO: Instead of this version; use jobPools to assign packets to threads.
+        /// Each thread will work until the jobPool is empty
         for (int i = startPacket; i <= endPacket; i++) {
             final int packetIndex = i;
             executor.submit(() -> {
                 try {
+                    /// TODO: sendData should be check for the endByte. If fileSize<(packetIndex +
+                    /// 1) * ResponseType.MAX_DATA_SIZE? fileSize:(packetIndex + 1)
+                    /// *ResponseType.MAX_DATA_SIZE
                     byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
                             packetIndex * ResponseType.MAX_DATA_SIZE, (packetIndex + 1) * ResponseType.MAX_DATA_SIZE,
                             null).toByteArray();
@@ -200,14 +208,17 @@ public class dummyClient {
         }
 
         long startTime = System.currentTimeMillis();
-        try (FileOutputStream fos = new FileOutputStream(filePath)) { // Open file output stream
-            // Create two threads representing the two endpoints
+
+        /// TODO: endpoint1 and endpoint2 should be properly synchronized before writing
+        /// to the file output stream
+        try (FileOutputStream fos = new FileOutputStream(filePath)) {
             Thread endpoint1Thread = new Thread(() -> {
                 try {
                     processPackets(endpoint1, file_id, jobPool, fos);
                 } catch (IOException | InterruptedException e) {
                     e.printStackTrace();
                 }
+
             });
 
             Thread endpoint2Thread = new Thread(() -> {
@@ -216,13 +227,12 @@ public class dummyClient {
                 } catch (IOException | InterruptedException e) {
                     e.printStackTrace();
                 }
+
             });
 
-            // Start the threads
             endpoint1Thread.start();
             endpoint2Thread.start();
 
-            // Wait for the threads to finish
             endpoint1Thread.join();
             endpoint2Thread.join();
         } catch (Exception e) {
@@ -233,6 +243,7 @@ public class dummyClient {
         System.out.println("File downloaded successfully in " + (endTime - startTime) + " milliseconds.");
     }
 
+    /// TODO: Process packets should apply flow control using endpoint.metrics
     private void processPackets(ServerEndpoint endpoint, int file_id, ConcurrentLinkedQueue<Long> jobPool,
             FileOutputStream fos)
             throws IOException, InterruptedException {
