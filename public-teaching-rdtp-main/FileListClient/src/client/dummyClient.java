@@ -3,7 +3,6 @@ package client;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
-import java.net.SocketTimeoutException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -12,7 +11,6 @@ import java.io.IOException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Scanner;
 import java.util.concurrent.BlockingQueue;
@@ -91,13 +89,17 @@ public class dummyClient {
         return response.getFileSize();
     }
 
+    /// TODO: Threads take packetIDs from the job pool and request the packets from
+    /// the server.
+    /// Do a full rewrite of getFileData
     private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
         DatagramSocket dsocket = new DatagramSocket();
         dsocket.setSoTimeout(requestTimeout);
-
+        /// TODO: check for correctness here. 1-1000 => startPacket: 0, endPacket: 1 =>
+        /// totalPackets: 2
         int startPacket = (int) (start / ResponseType.MAX_DATA_SIZE);
-        int endPacket = (int) (end / ResponseType.MAX_DATA_SIZE);
+        int endPacket = (int) Math.ceil((double) end / ResponseType.MAX_DATA_SIZE);
         int totalPackets = endPacket - startPacket + 1;
 
         ExecutorService executor = Executors.newFixedThreadPool(totalPackets);
@@ -194,6 +196,7 @@ public class dummyClient {
             jobPool.add((long) i);
         }
 
+        /// TODO: check if its capped at 11
         BlockingQueue<FileDataResponseType> packetQueue = new PriorityBlockingQueue<>();
 
         long startTime = System.currentTimeMillis();
@@ -241,6 +244,7 @@ public class dummyClient {
     private void processPackets(ServerEndpoint endpoint, int file_id, ConcurrentLinkedQueue<Long> jobPool,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
         while (!jobPool.isEmpty()) {
+
             int packetsToRequest = calculatePacketsToRequest(endpoint.getMetrics());
 
             List<Long> packetIndices = new ArrayList<>();
