@@ -4,7 +4,6 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
-import java.net.UnknownHostException;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -21,6 +20,7 @@ import model.FileDataResponseType;
 import model.FileDescriptor;
 import model.FileListResponseType;
 import model.FileSizeResponseType;
+import model.NetworkMetrics;
 import model.RequestType;
 import model.ResponseType;
 import model.ServerEndpoint;
@@ -34,23 +34,12 @@ public class dummyClient {
     private LinkedList<Long> rtts = new LinkedList<Long>();
     private static long fileSize = -1;
 
+    private static ServerEndpoint endpoint1;
     @SuppressWarnings("unused")
-    private ServerEndpoint endpoint;
-
-    public dummyClient(String ip, int port) {
-        try {
-            endpoint = new ServerEndpoint(ip, port);
-        } catch (UnknownHostException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public dummyClient() {
-    }
+    private static ServerEndpoint endpoint2;
 
     @SuppressWarnings("unused")
-    private void sendInvalidRequest(String ip, int port) throws IOException {
-        InetAddress IPAddress = InetAddress.getByName(ip);
+    private void sendInvalidRequest(InetAddress IPAddress, int port) throws IOException {
         RequestType req = new RequestType(4, 0, 0, 0, null);
         byte[] sendData = req.toByteArray();
         DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
@@ -64,11 +53,10 @@ public class dummyClient {
         dsocket.close();
     }
 
-    private String getFileList(String ip, int port) throws IOException {
-        InetAddress IPAddress = InetAddress.getByName(ip);
+    private String getFileList(ServerEndpoint endpoint) throws IOException {
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_LIST, 0, 0, 0, null).toByteArray();
         DatagramSocket dsocket = new DatagramSocket();
-        dsocket.send(new DatagramPacket(sendData, sendData.length, IPAddress, port));
+        dsocket.send(new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(), endpoint.getPort()));
         byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
         DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
         dsocket.receive(receivePacket);
@@ -85,11 +73,10 @@ public class dummyClient {
 
     }
 
-    private long getFileSize(String ip, int port, int file_id) throws IOException {
-        InetAddress IPAddress = InetAddress.getByName(ip);
+    private long getFileSize(ServerEndpoint endpoint, int file_id) throws IOException {
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_SIZE, file_id, 0, 0, null).toByteArray();
         DatagramSocket dsocket = new DatagramSocket();
-        dsocket.send(new DatagramPacket(sendData, sendData.length, IPAddress, port));
+        dsocket.send(new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(), endpoint.getPort()));
         byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
         DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
         dsocket.receive(receivePacket);
@@ -99,10 +86,9 @@ public class dummyClient {
         return response.getFileSize();
     }
 
-    private byte[] getFileData(String ip, int port, int file_id, long start, long end) throws IOException {
+    private byte[] getFileData(ServerEndpoint endpoint, int file_id, long start, long end) throws IOException {
         DatagramSocket dsocket = new DatagramSocket();
         dsocket.setSoTimeout(requestTimeout);
-        InetAddress IPAddress = InetAddress.getByName(ip);
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id, start, end, null)
                 .toByteArray();
         byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
@@ -110,7 +96,7 @@ public class dummyClient {
 
         while (true) {
             long startTime = System.nanoTime();
-            dsocket.send(new DatagramPacket(sendData, sendData.length, IPAddress, port));
+            dsocket.send(new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(), endpoint.getPort()));
             try {
                 dsocket.receive(receivePacket); // This will block until a packet is received or timeout occurs
                 long endTime = System.nanoTime();
@@ -127,7 +113,7 @@ public class dummyClient {
 
     }
 
-    private void getFile(String ip, int port, int file_id) throws IOException {
+    private void getFile(int file_id) throws IOException {
         File directory = new File(FOLDER_PATH);
         if (!directory.exists()) {
             directory.mkdirs();
@@ -141,7 +127,7 @@ public class dummyClient {
                 long start = i * ResponseType.MAX_DATA_SIZE + 1;
                 long end = Math.min((i + 1) * ResponseType.MAX_DATA_SIZE, fileSize);
 
-                byte[] packet = getFileData(ip, port, file_id, start, end);
+                byte[] packet = getFileData(endpoint1, file_id, start, end);
                 fos.write(packet); // Write each chunk to the file
 
             }
@@ -173,8 +159,8 @@ public class dummyClient {
         return sb.toString();
     }
 
-    private void programLoop(Scanner scanner, String ip1, int port1, dummyClient client) throws IOException {
-        String fileList = client.getFileList(ip1, port1);
+    private void programLoop(Scanner scanner, dummyClient client) throws IOException {
+        String fileList = client.getFileList(endpoint1);
         System.out.println("File List: " + fileList);
         int fileId = -1;
         while (fileId <= 0) {
@@ -189,12 +175,11 @@ public class dummyClient {
                 scanner.next();
             }
         }
-        System.out.println("Getting file size with ID: " + fileId);
-        fileSize = client.getFileSize(ip1, port1, fileId);
+        fileSize = client.getFileSize(endpoint1, fileId);
+
         System.out.println("File size: " + fileSize + " bytes. Downloading file...");
-        client.getFile(ip1, port1, fileId);
-        double averageRTT = calculateAverageRTT(client);
-        System.out.println("Average RTT: " + averageRTT + " milliseconds");
+        client.getFile(fileId);
+
         try {
             String md5Digest = computeFileDigest(filePath, "MD5");
             System.out.println("MD5 Digest: " + md5Digest);
@@ -203,23 +188,22 @@ public class dummyClient {
         }
     }
 
-    private double calculateAverageRTT(dummyClient client) {
-        long sum = 0;
-        for (long rtt : client.rtts) {
-            sum += rtt;
-        }
-        double averageRtt = sum / (double) client.rtts.size();
-        averageRtt /= 1000000; // Convert nanoseconds to milliseconds
-        return averageRtt;
-    }
-
     public static void main(String[] args) throws Exception {
-        if (args.length < 1) {
-            throw new IllegalArgumentException("ip:port is mandatory");
+        if (args.length < 2) {
+            throw new IllegalArgumentException("Usage: java dummyClient <server1_ip:port> <server2_ip:port>");
         }
         String[] adr1 = args[0].split(":");
         String ip1 = adr1[0];
         int port1 = Integer.valueOf(adr1[1]);
+        NetworkMetrics metrics1 = new NetworkMetrics(100);
+        endpoint1 = new ServerEndpoint(ip1, port1, metrics1);
+
+        String[] adr2 = args[0].split(":");
+        String ip2 = adr2[0];
+        int port2 = Integer.valueOf(adr2[1]);
+        NetworkMetrics metrics2 = new NetworkMetrics(100);
+        endpoint2 = new ServerEndpoint(ip2, port2, metrics2);
+
         dummyClient client = new dummyClient();
         Scanner scanner = new Scanner(System.in);
         while (true) {
@@ -232,7 +216,7 @@ public class dummyClient {
                 scanner.close();
                 break;
             }
-            client.programLoop(scanner, ip1, port1, client);
+            client.programLoop(scanner, client);
         }
         scanner.close();
     }

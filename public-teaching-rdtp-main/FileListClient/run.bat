@@ -1,1 +1,1 @@
-java -classpath "bin;lib/*" client.dummyClient %1
+java -classpath "bin;lib/*" client.dummyClient %1 %2
