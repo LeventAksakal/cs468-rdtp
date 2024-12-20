@@ -2,17 +2,24 @@ package model;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.LinkedList;
+
+import javafx.util.Pair;
 
 public class NetworkMetrics {
     private final Deque<Long> rttSamples;
     private final Deque<Long> jitterSamples;
     private final Deque<Boolean> packetLossSamples;
+    private final Deque<Pair<Long, Long>> throughputSamples;
+    private final long timeWindow;
     private Long lastRtt;
 
-    public NetworkMetrics(int windowSize) {
+    public NetworkMetrics(int windowSize, long timeWindow) {
         this.rttSamples = new ArrayDeque<>(windowSize);
+        this.timeWindow = timeWindow;
         this.jitterSamples = new ArrayDeque<>(windowSize);
         this.packetLossSamples = new ArrayDeque<>(windowSize);
+        throughputSamples = new LinkedList<>();
         this.lastRtt = null;
     }
 
@@ -36,6 +43,30 @@ public class NetworkMetrics {
             packetLossSamples.poll();
             packetLossSamples.add(lost);
         }
+    }
+
+    public void updateThroughput(long bytes, long timestamp) {
+        throughputSamples.add(new Pair<>(timestamp, bytes));
+        long currentTime = System.currentTimeMillis();
+        while (!throughputSamples.isEmpty() && (currentTime - throughputSamples.peekFirst().getKey() > timeWindow)) {
+            throughputSamples.pollFirst();
+        }
+    }
+
+    public double getAverageThroughput() {
+        long currentTime = System.currentTimeMillis();
+        long totalBytes = 0;
+        long earliestTimestamp = currentTime;
+
+        for (Pair<Long, Long> sample : throughputSamples) {
+            if (currentTime - sample.getKey() <= timeWindow) {
+                totalBytes += sample.getValue();
+                earliestTimestamp = Math.min(earliestTimestamp, sample.getKey());
+            }
+        }
+
+        long duration = currentTime - earliestTimestamp;
+        return duration > 0 ? (double) totalBytes / (duration / 1000.0) : 0;
     }
 
     public double getAverageRtt() {
@@ -68,6 +99,7 @@ public class NetworkMetrics {
         rttSamples.clear();
         jitterSamples.clear();
         packetLossSamples.clear();
+        throughputSamples.clear();
         lastRtt = null;
     }
 }
