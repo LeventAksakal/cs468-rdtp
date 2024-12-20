@@ -86,8 +86,11 @@ public class dummyClient {
         return response.getFileSize();
     }
 
+    ///TODO: getFileData() should send one request for one packet. It should send burst of requests.
+    /// But it should recieve each packet asynchronously. It should re-order the packets and return the byte[]
     private byte[] getFileData(ServerEndpoint endpoint, int file_id, long start, long end) throws IOException {
         DatagramSocket dsocket = new DatagramSocket();
+        /// TODO: Set timeout for the socket dynamically with the RTT
         dsocket.setSoTimeout(requestTimeout);
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id, start, end, null)
                 .toByteArray();
@@ -112,7 +115,15 @@ public class dummyClient {
         }
 
     }
-
+    /// TODO: Get file is the main controller that will select which endpoint to use
+    /// and will controll the flow based on endpoint.metrics. It should work like this:
+    /// Have a pool of packets to be downloaded
+    /// While(packets not downloaded) assign packets to endpoints based on their metrics
+    /// getFileData() will handle to downloading part and return the downloaded list of byte[]
+    /// getFileData() will return the packets in order so getFile() should write the recieved packets to
+    /// FileOutputStream to avoid buffering the whole downloaded file which is impossible for large files
+    /// Also getFile() should print the throughput and the average RTT of each endpoint and download progression
+    
     private void getFile(int file_id) throws IOException {
         File directory = new File(FOLDER_PATH);
         if (!directory.exists()) {
@@ -121,6 +132,7 @@ public class dummyClient {
         filePath = FOLDER_PATH + "/file_" + file_id;
 
         long packetCount = (fileSize + ResponseType.MAX_DATA_SIZE - 1) / ResponseType.MAX_DATA_SIZE;
+
         long startTime = System.currentTimeMillis();
         try (FileOutputStream fos = new FileOutputStream(filePath)) { // Open file output stream
             for (int i = 0; i < packetCount; i++) {
