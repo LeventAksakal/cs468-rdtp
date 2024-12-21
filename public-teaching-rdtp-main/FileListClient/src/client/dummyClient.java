@@ -31,7 +31,7 @@ import model.ServerEndpoint;
 
 public class dummyClient {
 
-    private static int requestTimeout = 1000;
+    private static final int REQUEST_TIMEOUT = 1000;
     private static final String FOLDER_PATH = "Downloaded Files";
     private static String filePath;
     private static long fileSize = -1;
@@ -89,7 +89,7 @@ public class dummyClient {
         return response.getFileSize();
     }
 
-private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end, DatagramSocket dsocket,
+    private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end, DatagramSocket dsocket,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
 
         int startPacket = (int) (start / ResponseType.MAX_DATA_SIZE);
@@ -103,23 +103,26 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
                 start, end, null).toByteArray();
         DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, endpoint.getIpAddress(),
                 endpoint.getPort());
+
+        long startTime = System.currentTimeMillis();
         dsocket.send(sendPacket);
 
-        dsocket.setSoTimeout(calculateRequestTimeOut(endpoint.getMetrics()));
         while (jobPool.containsValue(false)) {
             try {
+                dsocket.setSoTimeout(calculateRequestTimeOut(endpoint.getMetrics()));
                 byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
                 DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
                 dsocket.receive(receivePacket);
-
+                long endTime = System.currentTimeMillis();
                 FileDataResponseType response = new FileDataResponseType(receivePacket.getData());
                 int receivedPacketIndex = (int) response.getStart_byte() / ResponseType.MAX_DATA_SIZE;
 
                 if (jobPool.containsKey(receivedPacketIndex) && !jobPool.get(receivedPacketIndex)) {
-                    /// TODO: maybe have two separate received packets then add them to get
-                    /// totalReceivedPackets
                     synchronized (totalReceivedPacketsLock) {
                         receivedPacketsProgressBar++;
+                        endpoint.metrics.updateThroughput(response.getData().length, System.currentTimeMillis());
+                        endpoint.metrics.updateRtt(startTime - endTime);
+                        endpoint.metrics.updatePacketLoss(false);
                     }
                     packetQueue.put(response);
                     jobPool.put(receivedPacketIndex, true);
@@ -142,6 +145,7 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
                         dsocket.send(outPacket);
                     }
                 }
+                startTime = System.currentTimeMillis();
             }
         }
     }
@@ -219,6 +223,7 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
         DatagramSocket dsocket = new DatagramSocket();
         while (!jobPool.isEmpty()) {
 
+            // TODO: Implement the logic for calculating the number of packets to request
             int packetsToRequest = 5;// calculatePacketsToRequest(endpoint.getMetrics());
 
             Deque<Long> packetIndices = new LinkedList<>();
@@ -282,16 +287,12 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
         return Math.max(1, adjustedPackets);
     }
 
-    private int calculateRequestTimeOut(NetworkMetrics metrics) 
-    {
-        if (metrics.getAverageRtt() > 0) 
-        {
+    private int calculateRequestTimeOut(NetworkMetrics metrics) {
+        if (metrics.getAverageRtt() > 0) {
             return (int) (metrics.getAverageRtt() * 2);
-        } 
-        else 
-        {
-            return requestTimeout;
-            
+        } else {
+            return REQUEST_TIMEOUT;
+
         }
     }
 
@@ -329,6 +330,8 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
         return sb.toString();
     }
 
+    /// TODO: Add throughput metrics to the progress bar
+    /// Fix the RTT metrics, it's negative.
     private void showProgressBar(int current, int total, ServerEndpoint endpoint1, ServerEndpoint endpoint2) {
         int barLength = 50; // Length of the progress bar in characters
         int progress = (int) ((double) current / total * barLength);
@@ -358,6 +361,10 @@ private void getFileData(ServerEndpoint endpoint, int file_id, long start, long 
     }
 
     private void programLoop(Scanner scanner, dummyClient client) throws IOException {
+        fileSize = -1;
+        receivedPacketsProgressBar = 0;
+        totalPacketsProgressBar = 0;
+
         String fileList = client.getFileList(endpoint1);
         System.out.println("File List: " + fileList);
         int fileId = -1;
