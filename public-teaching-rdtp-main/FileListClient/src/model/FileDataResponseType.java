@@ -1,6 +1,6 @@
 package model;
 
-public class FileDataResponseType extends ResponseType {
+public class FileDataResponseType extends ResponseType implements Comparable<FileDataResponseType> {
 
 	public FileDataResponseType(int responseType, int file_id, long start_byte, long end_byte, byte[] data) {
 		super(responseType, file_id, start_byte, end_byte, data);
@@ -29,5 +29,10 @@ public class FileDataResponseType extends ResponseType {
 		resultBuf.append("\nstart_byte:" + this.getStart_byte());
 		resultBuf.append("\nend_byte:" + this.getEnd_byte());
 		return resultBuf.toString();
+	}
+
+	@Override
+	public int compareTo(FileDataResponseType other) {
+		return Long.compare(this.start_byte, other.start_byte);
 	}
 }
