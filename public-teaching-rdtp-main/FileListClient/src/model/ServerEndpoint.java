@@ -26,8 +26,4 @@ public class ServerEndpoint {
     public NetworkMetrics getMetrics() {
         return metrics;
     }
-
-    public NetworkMetrics getMetrics() {
-        return metrics;
-    }
 }
