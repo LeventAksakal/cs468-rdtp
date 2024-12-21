@@ -11,10 +11,10 @@ import java.io.IOException;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedList;
-import java.util.List;
+import java.util.Map;
 import java.util.Scanner;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -34,9 +34,7 @@ public class dummyClient {
     private static int requestTimeout = 1000;
     private static final String FOLDER_PATH = "Downloaded Files";
     private static String filePath;
-
     private static long fileSize = -1;
-
     private static ServerEndpoint endpoint1;
     private static ServerEndpoint endpoint2;
     private static int receivedPacketsProgressBar = 0;
@@ -91,16 +89,14 @@ public class dummyClient {
         return response.getFileSize();
     }
 
-    private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end,
+private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end, DatagramSocket dsocket,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
-        DatagramSocket dsocket = new DatagramSocket();
 
         int startPacket = (int) (start / ResponseType.MAX_DATA_SIZE);
         int endPacket = (int) Math.ceil(((double) end / ResponseType.MAX_DATA_SIZE)) - 1;
-        /// TODO: change the datastructure to be efficient
-        List<Integer> jobPool = new ArrayList<>();
+        Map<Integer, Boolean> jobPool = new HashMap<>();
         for (int i = startPacket; i <= endPacket; i++) {
-            jobPool.add(i);
+            jobPool.put(i, false);
         }
 
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
@@ -109,9 +105,8 @@ public class dummyClient {
                 endpoint.getPort());
         dsocket.send(sendPacket);
 
-        /// TODO: set timeout dynamically
-        dsocket.setSoTimeout(requestTimeout);
-        while (!jobPool.isEmpty()) {
+        dsocket.setSoTimeout(calculateRequestTimeOut(endpoint.getMetrics()));
+        while (jobPool.containsValue(false)) {
             try {
                 byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
                 DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
@@ -120,37 +115,37 @@ public class dummyClient {
                 FileDataResponseType response = new FileDataResponseType(receivePacket.getData());
                 int receivedPacketIndex = (int) response.getStart_byte() / ResponseType.MAX_DATA_SIZE;
 
-                if (jobPool.contains(receivedPacketIndex)) {
-                    /// TODO: maybe have two seperate recevied packets then add them to get
+                if (jobPool.containsKey(receivedPacketIndex) && !jobPool.get(receivedPacketIndex)) {
+                    /// TODO: maybe have two separate received packets then add them to get
                     /// totalReceivedPackets
                     synchronized (totalReceivedPacketsLock) {
                         receivedPacketsProgressBar++;
                     }
                     packetQueue.put(response);
-                    jobPool.remove(Integer.valueOf(receivedPacketIndex));
+                    jobPool.put(receivedPacketIndex, true);
                 }
 
             } catch (SocketTimeoutException e) {
                 System.err.println("Receive operation timed out. Retransmitting packets.");
-                for (int packetIndex : jobPool) {
-                    long packetStartByte = packetIndex * ResponseType.MAX_DATA_SIZE;
-                    long packetEndByte = (packetIndex == endPacket) ? end
-                            : (packetIndex + 1) * ResponseType.MAX_DATA_SIZE;
+                for (Map.Entry<Integer, Boolean> entry : jobPool.entrySet()) {
+                    if (!entry.getValue()) {
+                        int packetIndex = entry.getKey();
+                        long packetStartByte = packetIndex * ResponseType.MAX_DATA_SIZE;
+                        long packetEndByte = (packetIndex == endPacket) ? end
+                                : (packetIndex + 1) * ResponseType.MAX_DATA_SIZE;
 
-                    byte[] out = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
-                            packetStartByte, packetEndByte, null).toByteArray();
-                    DatagramPacket outPacket = new DatagramPacket(out, out.length,
-                            endpoint.getIpAddress(),
-                            endpoint.getPort());
-                    dsocket.send(outPacket);
+                        byte[] out = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_DATA, file_id,
+                                packetStartByte, packetEndByte, null).toByteArray();
+                        DatagramPacket outPacket = new DatagramPacket(out, out.length,
+                                endpoint.getIpAddress(),
+                                endpoint.getPort());
+                        dsocket.send(outPacket);
+                    }
                 }
             }
         }
-
-        dsocket.close();
     }
 
-    /// TODO: move the socket creation to processPackets
     private void getFile(int file_id) throws IOException {
         File directory = new File(FOLDER_PATH);
         if (!directory.exists()) {
@@ -221,6 +216,7 @@ public class dummyClient {
 
     private void processPackets(ServerEndpoint endpoint, int file_id, ConcurrentLinkedQueue<Long> jobPool,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
+        DatagramSocket dsocket = new DatagramSocket();
         while (!jobPool.isEmpty()) {
 
             int packetsToRequest = 5;// calculatePacketsToRequest(endpoint.getMetrics());
@@ -243,8 +239,9 @@ public class dummyClient {
             long start = packetIndices.peekFirst() * ResponseType.MAX_DATA_SIZE + 1;
             long end = Math.min((packetIndices.peekLast() + 1) * ResponseType.MAX_DATA_SIZE, fileSize);
 
-            getFileData(endpoint, file_id, start, end, packetQueue);
+            getFileData(endpoint, file_id, start, end, dsocket, packetQueue);
         }
+        dsocket.close();
     }
 
     private void updateProgressBar() throws IOException, InterruptedException {
@@ -283,6 +280,19 @@ public class dummyClient {
         }
 
         return Math.max(1, adjustedPackets);
+    }
+
+    private int calculateRequestTimeOut(NetworkMetrics metrics) 
+    {
+        if (metrics.getAverageRtt() > 0) 
+        {
+            return (int) (metrics.getAverageRtt() * 2);
+        } 
+        else 
+        {
+            return requestTimeout;
+            
+        }
     }
 
     private void writePackets(FileOutputStream fos, BlockingQueue<FileDataResponseType> packetQueue, long packetCount)
