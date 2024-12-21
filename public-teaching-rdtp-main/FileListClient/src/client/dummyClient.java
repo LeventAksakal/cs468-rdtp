@@ -89,6 +89,7 @@ public class dummyClient {
         return response.getFileSize();
     }
 
+    /// TODO: Ground control to Major Tom, we have a problem here. RTT is f*cked.
     private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end, DatagramSocket dsocket,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
 
@@ -121,6 +122,7 @@ public class dummyClient {
                     synchronized (totalReceivedPacketsLock) {
                         receivedPacketsProgressBar++;
                         endpoint.metrics.updateThroughput(response.getData().length, System.currentTimeMillis());
+                        /// TODO: should be endTime - startTime but change it after you fix the RTT
                         endpoint.metrics.updateRtt(startTime - endTime);
                         endpoint.metrics.updatePacketLoss(false);
                     }
@@ -257,36 +259,37 @@ public class dummyClient {
         showProgressBar(receivedPacketsProgressBar, totalPacketsProgressBar, endpoint1, endpoint2);
     }
 
-    // TODO: implement the logic for calculating the number of packets to request
     @SuppressWarnings("unused")
     private int calculatePacketsToRequest(NetworkMetrics metrics) {
         double throughput = metrics.getAverageThroughput();
         double packetLossRate = metrics.getPacketLossRate();
         double jitter = metrics.getAverageJitter();
-        double rtt = metrics.getAverageRtt();
+        packetLossRate = metrics.getPacketLossRate();
 
-        int basePackets = 10;
-        int adjustedPackets = basePackets;
+        final int BASE_PACKETS = 10; // Minimum 10KB/s
+        final int MAX_PACKETS = 100000; // Maximum 100MB/s
+        final double THROUGHPUT_MULTIPLIER = 10;
 
-        if (throughput > 0) {
-            adjustedPackets = (int) (throughput / ResponseType.MAX_DATA_SIZE);
-        }
+        int packets = (int) (throughput * THROUGHPUT_MULTIPLIER);
 
         if (packetLossRate > 0.1) {
-            adjustedPackets = Math.max(1, adjustedPackets / 2);
+            packets *= (1 - packetLossRate);
+        } else if (packetLossRate > 0.05) {
+            packets *= 0.9;
         }
 
         if (jitter > 50) {
-            adjustedPackets = Math.max(1, adjustedPackets / 2);
+            packets *= 0.8;
+        } else if (jitter > 20) {
+            packets *= 0.9;
         }
 
-        if (rtt > 100) {
-            adjustedPackets = Math.max(1, adjustedPackets / 2);
-        }
+        packets = Math.max(BASE_PACKETS, Math.min(packets, MAX_PACKETS));
 
-        return Math.max(1, adjustedPackets);
+        return packets;
     }
 
+    /// TODO: Fix this calculation.
     private int calculateRequestTimeOut(NetworkMetrics metrics) {
         if (metrics.getAverageRtt() > 0) {
             return (int) (metrics.getAverageRtt() * 2);
