@@ -131,11 +131,14 @@ public class dummyClient {
                 }
 
             } catch (SocketTimeoutException e) {
-                System.err.println("Receive operation timed out. Retransmitting packets.");
+                //System.err.println("Receive operation timed out. Retransmitting packets.");
                 for (Map.Entry<Integer, Boolean> entry : jobPool.entrySet()) {
                     if (!entry.getValue()) {
+                        synchronized (totalReceivedPacketsLock) {
+                            endpoint.metrics.updatePacketLoss(true);
+                        }
                         int packetIndex = entry.getKey();
-                        long packetStartByte = packetIndex * ResponseType.MAX_DATA_SIZE;
+                        long packetStartByte = packetIndex * ResponseType.MAX_DATA_SIZE + 1;
                         long packetEndByte = (packetIndex == endPacket) ? end
                                 : (packetIndex + 1) * ResponseType.MAX_DATA_SIZE;
 
@@ -348,19 +351,27 @@ public class dummyClient {
         }
         bar.append("] ").append((current * 100) / total).append("%");
 
-        String metrics = String.format(
-                "E1 RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%% | E2 RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%",
-                endpoint1.getMetrics().getAverageRtt(),
-                endpoint1.getMetrics().getAverageJitter(),
-                endpoint1.getMetrics().getPacketLossRate() * 100,
-                endpoint2.getMetrics().getAverageRtt(),
-                endpoint2.getMetrics().getAverageJitter(),
-                endpoint2.getMetrics().getPacketLossRate() * 100);
-
+        String metrics1;
+        String metrics2;
+        synchronized (totalReceivedPacketsLock) {
+            metrics1 = String.format(
+                    "E1 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f Mbps",
+                    endpoint1.getMetrics().getAverageRtt(),
+                    endpoint1.getMetrics().getAverageJitter(),
+                    endpoint1.getMetrics().getPacketLossRate() * 100,
+                    endpoint1.getMetrics().getAverageThroughput());
+            metrics2 = String.format(
+                    "E2 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f Mbps",
+                    endpoint2.getMetrics().getAverageRtt(),
+                    endpoint2.getMetrics().getAverageJitter(),
+                    endpoint2.getMetrics().getPacketLossRate() * 100,
+                    endpoint2.getMetrics().getAverageThroughput());
+        }
         // Clear the previous line
         System.out.print("\033[1A\033[2K");
+        System.out.print("\033[1A\033[2K");
         // Print the progress bar and metrics on separate lines
-        System.out.print("\r" + bar.toString() + "\n" + metrics);
+        System.out.print("\r" + bar.toString() + "\n" + metrics1 + "\n" + metrics2);
     }
 
     private void programLoop(Scanner scanner, dummyClient client) throws IOException {
