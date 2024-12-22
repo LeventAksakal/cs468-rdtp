@@ -2,7 +2,6 @@ package client;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
-import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.io.File;
 import java.io.FileInputStream;
@@ -31,7 +30,6 @@ import model.ServerEndpoint;
 
 public class dummyClient {
 
-    private static final int REQUEST_TIMEOUT = 1000;
     private static final String FOLDER_PATH = "Downloaded Files";
     private static String filePath;
     private static long fileSize = -1;
@@ -41,21 +39,6 @@ public class dummyClient {
     private static int totalPacketsProgressBar = 0;
     private final Object totalReceivedPacketsLock = new Object();
 
-    @SuppressWarnings("unused")
-    private void sendInvalidRequest(InetAddress IPAddress, int port) throws IOException {
-        RequestType req = new RequestType(4, 0, 0, 0, null);
-        byte[] sendData = req.toByteArray();
-        DatagramPacket sendPacket = new DatagramPacket(sendData, sendData.length, IPAddress, port);
-        DatagramSocket dsocket = new DatagramSocket();
-        dsocket.send(sendPacket);
-        byte[] receiveData = new byte[ResponseType.MAX_RESPONSE_SIZE];
-        DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
-        dsocket.receive(receivePacket);
-        ResponseType response = new ResponseType(receivePacket.getData());
-        loggerManager.getInstance(this.getClass()).debug(response.toString());
-        dsocket.close();
-    }
-
     private String getFileList(ServerEndpoint endpoint) throws IOException {
         byte[] sendData = new RequestType(RequestType.REQUEST_TYPES.GET_FILE_LIST, 0, 0, 0, null).toByteArray();
         DatagramSocket dsocket = new DatagramSocket();
@@ -64,7 +47,6 @@ public class dummyClient {
         DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
         dsocket.receive(receivePacket);
         FileListResponseType response = new FileListResponseType(receivePacket.getData());
-        // loggerManager.getInstance(this.getClass()).debug(response.toString());
         dsocket.close();
 
         StringBuffer sb = new StringBuffer();
@@ -84,12 +66,10 @@ public class dummyClient {
         DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
         dsocket.receive(receivePacket);
         FileSizeResponseType response = new FileSizeResponseType(receivePacket.getData());
-        // loggerManager.getInstance(this.getClass()).debug(response.toString());
         dsocket.close();
         return response.getFileSize();
     }
 
-    /// TODO: Ground control to Major Tom, we have a problem here. RTT is f*cked.
     private void getFileData(ServerEndpoint endpoint, int file_id, long start, long end, DatagramSocket dsocket,
             BlockingQueue<FileDataResponseType> packetQueue) throws IOException, InterruptedException {
 
@@ -122,8 +102,7 @@ public class dummyClient {
                     synchronized (totalReceivedPacketsLock) {
                         receivedPacketsProgressBar++;
                         endpoint.metrics.updateThroughput(response.getData().length, System.currentTimeMillis());
-                        /// TODO: should be endTime - startTime but change it after you fix the RTT
-                        endpoint.metrics.updateRtt(startTime - endTime);
+                        endpoint.metrics.updateRtt(endTime - startTime);
                         endpoint.metrics.updatePacketLoss(false);
                     }
                     packetQueue.put(response);
@@ -131,7 +110,6 @@ public class dummyClient {
                 }
 
             } catch (SocketTimeoutException e) {
-                //System.err.println("Receive operation timed out. Retransmitting packets.");
                 for (Map.Entry<Integer, Boolean> entry : jobPool.entrySet()) {
                     if (!entry.getValue()) {
                         synchronized (totalReceivedPacketsLock) {
@@ -228,8 +206,7 @@ public class dummyClient {
         DatagramSocket dsocket = new DatagramSocket();
         while (!jobPool.isEmpty()) {
 
-            // TODO: Implement the logic for calculating the number of packets to request
-            int packetsToRequest = 5;// calculatePacketsToRequest(endpoint.getMetrics());
+            int packetsToRequest = calculatePacketsToRequest(endpoint.getMetrics());
 
             Deque<Long> packetIndices = new LinkedList<>();
             synchronized (jobPool) {
@@ -262,15 +239,13 @@ public class dummyClient {
         showProgressBar(receivedPacketsProgressBar, totalPacketsProgressBar, endpoint1, endpoint2);
     }
 
-    @SuppressWarnings("unused")
     private int calculatePacketsToRequest(NetworkMetrics metrics) {
         double throughput = metrics.getAverageThroughput();
         double packetLossRate = metrics.getPacketLossRate();
         double jitter = metrics.getAverageJitter();
-        packetLossRate = metrics.getPacketLossRate();
 
-        final int BASE_PACKETS = 10; // Minimum 10KB/s
-        final int MAX_PACKETS = 100000; // Maximum 100MB/s
+        final int BASE_PACKETS = 10; // Minimum 10KB
+        final int MAX_PACKETS = 60; // Maximum 60KB
         final double THROUGHPUT_MULTIPLIER = 10;
 
         int packets = (int) (throughput * THROUGHPUT_MULTIPLIER);
@@ -292,14 +267,23 @@ public class dummyClient {
         return packets;
     }
 
-    /// TODO: Fix this calculation.
     private int calculateRequestTimeOut(NetworkMetrics metrics) {
-        if (metrics.getAverageRtt() > 0) {
-            return (int) (metrics.getAverageRtt() * 2);
-        } else {
-            return REQUEST_TIMEOUT;
 
-        }
+        final int MIN_TIMEOUT = 50; // Minimum timeout in ms
+        final int MAX_TIMEOUT = 1000; // Maximum timeout in ms
+        final double JITTER_WEIGHT = 0.5;
+        final double PACKET_LOSS_WEIGHT = 0.3;
+        final double RTT_WEIGHT = 1.2;
+
+        double rttFactor = metrics.getAverageRtt() * RTT_WEIGHT;
+        double jitterFactor = metrics.getAverageJitter() * JITTER_WEIGHT;
+        double packetLossFactor = metrics.getPacketLossRate() * PACKET_LOSS_WEIGHT;
+
+        double timeout = rttFactor + jitterFactor + packetLossFactor;
+
+        timeout = Math.max(MIN_TIMEOUT, Math.min(MAX_TIMEOUT, timeout));
+
+        return (int) timeout;
     }
 
     private void writePackets(FileOutputStream fos, BlockingQueue<FileDataResponseType> packetQueue, long packetCount)
@@ -336,10 +320,8 @@ public class dummyClient {
         return sb.toString();
     }
 
-    /// TODO: Add throughput metrics to the progress bar
-    /// Fix the RTT metrics, it's negative.
     private void showProgressBar(int current, int total, ServerEndpoint endpoint1, ServerEndpoint endpoint2) {
-        int barLength = 50; // Length of the progress bar in characters
+        int barLength = 50;
         int progress = (int) ((double) current / total * barLength);
         StringBuilder bar = new StringBuilder("[");
         for (int i = 0; i < barLength; i++) {
@@ -355,22 +337,22 @@ public class dummyClient {
         String metrics2;
         synchronized (totalReceivedPacketsLock) {
             metrics1 = String.format(
-                    "E1 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f Mbps",
+                    "E1 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f KB/s",
                     endpoint1.getMetrics().getAverageRtt(),
                     endpoint1.getMetrics().getAverageJitter(),
                     endpoint1.getMetrics().getPacketLossRate() * 100,
-                    endpoint1.getMetrics().getAverageThroughput());
+                    endpoint1.getMetrics().getAverageThroughput() / 1000);
             metrics2 = String.format(
-                    "E2 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f Mbps",
+                    "E2 | RTT: %.2f ms, Jitter: %.2f ms, Loss: %.2f%%, Throughput: %.2f KB/s",
                     endpoint2.getMetrics().getAverageRtt(),
                     endpoint2.getMetrics().getAverageJitter(),
                     endpoint2.getMetrics().getPacketLossRate() * 100,
-                    endpoint2.getMetrics().getAverageThroughput());
+                    endpoint2.getMetrics().getAverageThroughput() / 1000);
         }
-        // Clear the previous line
+
         System.out.print("\033[1A\033[2K");
         System.out.print("\033[1A\033[2K");
-        // Print the progress bar and metrics on separate lines
+
         System.out.print("\r" + bar.toString() + "\n" + metrics1 + "\n" + metrics2);
     }
 
@@ -426,11 +408,12 @@ public class dummyClient {
         dummyClient client = new dummyClient();
         Scanner scanner = new Scanner(System.in);
         while (true) {
-            System.out.println("\n***-----------------------------------***");
-            System.out.println("Welcome to the File List Client.");
+            System.out.println("\n[============File List Client============]");
             System.out.println("Enter 'q' to quit or any other key to continue.");
-            System.out.println("***-----------------------------------***\n");
+            System.out.println("[========================================]\n");
             String input = scanner.next();
+            System.out.print("\033[H\033[2J");
+            System.out.flush();
             if (input.equals("q")) {
                 scanner.close();
                 break;
